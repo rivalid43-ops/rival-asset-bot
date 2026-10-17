@@ -1,0 +1,18 @@
+{
+  "name": "rival-asset-bot",
+  "version": "1.0.0",
+  "description": "RIVAL ASSET BOT — upload assets to Roblox Open Cloud Assets via Discord",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "deploy-commands": "node deploy-commands.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.0",
+    "node-fetch": "^3.4.1",
+    "dotenv": "^16.3.1"
+  }
+}
