@@ -17,37 +17,61 @@ const commands = [
   },
   {
     name: 'publish-audio',
-    description: 'Upload an audio file to Roblox Open Cloud Assets',
+    description: 'Upload an audio file to Roblox Open Cloud Assets or provide existing asset id/url',
     options: [
       {
         name: 'file',
         description: 'Audio file to upload',
         type: ApplicationCommandOptionType.Attachment,
-        required: true
+        required: false
+      },
+      {
+        name: 'asset',
+        description: 'Existing Roblox asset id or URL (if you already have the asset)',
+        type: ApplicationCommandOptionType.String,
+        required: false
+      },
+      {
+        name: 'play_speed',
+        description: 'Optional recommended Sound.PlaybackSpeed to use in Roblox (e.g. 1.0)',
+        type: ApplicationCommandOptionType.Number,
+        required: false
       }
     ]
   },
   {
     name: 'publish-image',
-    description: 'Upload an image (decal) to Roblox Open Cloud Assets',
+    description: 'Upload an image (decal) to Roblox Open Cloud Assets or provide existing asset id/url',
     options: [
       {
         name: 'file',
         description: 'Image file to upload',
         type: ApplicationCommandOptionType.Attachment,
-        required: true
+        required: false
+      },
+      {
+        name: 'asset',
+        description: 'Existing Roblox asset id or URL (optional)',
+        type: ApplicationCommandOptionType.String,
+        required: false
       }
     ]
   },
   {
     name: 'publish-model',
-    description: 'Upload a model file to Roblox Open Cloud Assets',
+    description: 'Upload a model file to Roblox Open Cloud Assets or provide existing asset id/url',
     options: [
       {
         name: 'file',
         description: 'Model file to upload (fbx, glb, rbxm, etc)',
         type: ApplicationCommandOptionType.Attachment,
-        required: true
+        required: false
+      },
+      {
+        name: 'asset',
+        description: 'Existing Roblox asset id or URL (optional)',
+        type: ApplicationCommandOptionType.String,
+        required: false
       }
     ]
   },

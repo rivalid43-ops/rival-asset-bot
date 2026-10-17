@@ -39,7 +39,7 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds], partials: [Part
 const commandHandlers = {
   help: async (interaction) => {
     await interaction.reply({ content: `RIVAL ASSET BOT - Commands:\n
-- /help — show this help\n- /publish-audio <file> — upload audio to Roblox Open Cloud Assets\n- /publish-image <file> — upload image (Decal/Image)\n- /publish-model <file> — upload 3D model\n- /my-uploads — show your upload history\n
+- /help — show this help\n- /publish-audio <file|asset> [play_speed] — upload audio to Roblox Open Cloud Assets OR provide an existing asset id/url. Optionally set playback speed for Roblox (e.g. 1.0).\n- /publish-image <file|asset> — upload image to Roblox Open Cloud Assets or provide existing asset id/url.\n- /publish-model <file|asset> — upload a model file to Roblox Open Cloud Assets or provide existing asset id/url.\n- /my-uploads — show your upload history\n
 Notes:\n- Only allowed users can publish.\n- Roblox API key and creator ID must be configured.\n`, ephemeral: true });
   },
 
@@ -52,7 +52,7 @@ Notes:\n- Only allowed users can publish.\n- Roblox API key and creator ID must 
     }
     const lines = records.slice().reverse().slice(0, 10).map(r => {
       const when = new Date(r.timestamp).toISOString();
-      return `• [${when}] ${r.command} ${r.originalName} — ${r.size} bytes — status: ${r.status}${r.assetId ? ' — assetId: ' + r.assetId : ''}`;
+      return `• [${when}] ${r.command} ${r.originalName || ('asset:' + (r.assetId||'unknown'))} — ${r.size || 0} bytes — status: ${r.status}${r.assetId ? ' — assetId: ' + r.assetId : ''}`;
     });
     await interaction.reply({ content: `Your recent uploads:\n${lines.join('\n')}`, ephemeral: true });
   }
@@ -91,6 +91,14 @@ async function fetchAttachmentBuffer(url) {
   if (!res.ok) throw new Error(`Failed to fetch attachment: ${res.status}`);
   const ab = await res.arrayBuffer();
   return Buffer.from(ab);
+}
+
+function extractRobloxAssetId(text) {
+  if (!text) return null;
+  // common patterns: rbxassetid://12345, https://www.roblox.com/library/12345/name, just digits
+  const urlMatch = text.match(/(\d{6,})/);
+  if (urlMatch) return urlMatch[1];
+  return null;
 }
 
 async function uploadToRoblox({ buffer, fileName, contentType, displayName, type }) {
@@ -132,7 +140,6 @@ async function pollOperation(operationId, timeoutMs = 30000, interval = 2000) {
     });
     if (!res.ok) throw new Error(`Polling operation failed: ${res.status}`);
     const json = await res.json();
-    // Typical fields: status (Succeeded|Failed|PendingModeration) and maybe asset id
     if (json.status && (json.status === 'Succeeded' || json.status === 'Failed')) {
       return json;
     }
@@ -161,9 +168,40 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    const attachment = interaction.options.getAttachment('file');
+    // For publish-audio, support optional existing asset id/url and play_speed
+    const providedAsset = interaction.options.getString && interaction.options.getString('asset');
+    const playSpeed = interaction.options.getNumber && interaction.options.getNumber('play_speed');
+
+    if (playSpeed !== null && playSpeed !== undefined) {
+      if (typeof playSpeed !== 'number' || playSpeed <= 0 || playSpeed > 5) {
+        await interaction.reply({ content: 'play_speed must be a number > 0 and <= 5. Typical values are around 0.5-2.0.', ephemeral: true });
+        return;
+      }
+    }
+
+    let attachment = interaction.options.getAttachment && interaction.options.getAttachment('file');
+
+    let finalAssetId = null;
+    let operationId = null;
+    let status = 'Unknown';
+
+    // If user provided an existing asset id/url, detect it and skip upload
+    const detectedId = extractRobloxAssetId(providedAsset || (attachment && attachment.name) || interaction.options.getString && interaction.options.getString('asset'));
+    if (detectedId) {
+      finalAssetId = detectedId;
+      status = 'Provided';
+      recordUpload(interaction.user.id, { timestamp: Date.now(), command: cmd, originalName: `asset:${finalAssetId}`, size: 0, contentType: 'n/a', status, assetId: finalAssetId });
+      let reply = `Detected provided Roblox asset ID: ${finalAssetId}.`;
+      if (cmd === 'publish-audio' && playSpeed) {
+        reply += `\nRecommended Roblox usage: set Sound.PlaybackSpeed = ${playSpeed};`;
+      }
+      reply += '\nNote: this bot did not upload the file. Availability and moderation are determined by Roblox.';
+      await interaction.reply({ content: reply, ephemeral: true });
+      return;
+    }
+
     if (!attachment) {
-      await interaction.reply({ content: 'No file provided. Please attach a file with the command.', ephemeral: true });
+      await interaction.reply({ content: 'No file provided and no recognizable asset id/url. Please attach a file or provide an existing Roblox asset id/url via the asset option.', ephemeral: true });
       return;
     }
 
@@ -214,9 +252,9 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     // Response should contain operationId (and possibly id)
-    const operationId = robloxResp.operationId || robloxResp.operation_id || robloxResp.operation || null;
-    let status = 'Uploaded';
-    let assetId = robloxResp.id || robloxResp.assetId || null;
+    operationId = robloxResp.operationId || robloxResp.operation_id || robloxResp.operation || null;
+    status = 'Uploaded';
+    finalAssetId = robloxResp.id || robloxResp.assetId || null;
 
     if (operationId) {
       // poll for moderation / final status
@@ -224,7 +262,7 @@ client.on('interactionCreate', async (interaction) => {
         const op = await pollOperation(operationId, 30000, 2500);
         if (op.status === 'Succeeded') {
           status = 'Succeeded';
-          assetId = assetId || op.assetId || op.result?.assetId || op.result?.id || null;
+          finalAssetId = finalAssetId || op.assetId || op.result?.assetId || op.result?.id || null;
         } else {
           status = op.status || 'Failed';
         }
@@ -235,11 +273,15 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     // Record upload (do not save any secrets)
-    recordUpload(interaction.user.id, { timestamp: Date.now(), command: cmd, originalName: attachment.name, size: attachment.size, contentType, status, assetId, operationId });
+    recordUpload(interaction.user.id, { timestamp: Date.now(), command: cmd, originalName: attachment.name, size: attachment.size, contentType, status, assetId: finalAssetId, operationId });
 
     // Reply with non-secret details
     let reply = `Upload recorded. Status: ${status}.`;
-    if (assetId) reply += ` Asset ID: ${assetId}`;
+    if (finalAssetId) reply += ` Asset ID: ${finalAssetId}`;
+    if (cmd === 'publish-audio' && playSpeed) {
+      reply += `\nRecommended Roblox usage: set Sound.PlaybackSpeed = ${playSpeed};`;
+      reply += `\nIf you want to change pitch only without changing playback duration, Roblox uses PlaybackSpeed for overall playback speed. Test values in-game as moderation/encoding may affect final duration.`;
+    }
     reply += '\nNote: final moderation and availability are handled by Roblox. Supported formats, permissions, and moderation follow Roblox rules.';
 
     await interaction.editReply({ content: reply });
