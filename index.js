@@ -40,7 +40,7 @@ const commandHandlers = {
   help: async (interaction) => {
     await interaction.reply({ content: `RIVAL ASSET BOT - Commands:\n
 - /help — show this help\n- /publish-audio <file|asset> [play_speed] — upload audio to Roblox Open Cloud Assets OR provide an existing asset id/url. Optionally set playback speed for Roblox (e.g. 1.0).\n- /publish-image <file|asset> — upload image to Roblox Open Cloud Assets or provide existing asset id/url.\n- /publish-model <file|asset> — upload a model file to Roblox Open Cloud Assets or provide existing asset id/url.\n- /my-uploads — show your upload history\n
-Notes:\n- Only allowed users can publish.\n- Roblox API key and creator ID must be configured.\n`, ephemeral: true });
+Notes:\n- Only allowed users can publish.\n- Roblox API key and creator ID must be configured.\n\nSecurity/Policy:\n- The bot will attempt to download a provided Roblox asset ID and re-publish it under the configured ROBLOX_CREATOR_ID. Only use this for assets you have rights to publish. The bot will log publish actions.`, ephemeral: true });
   },
 
   'my-uploads': async (interaction) => {
@@ -95,10 +95,27 @@ async function fetchAttachmentBuffer(url) {
 
 function extractRobloxAssetId(text) {
   if (!text) return null;
-  // common patterns: rbxassetid://12345, https://www.roblox.com/library/12345/name, just digits
-  const urlMatch = text.match(/(\d{6,})/);
-  if (urlMatch) return urlMatch[1];
-  return null;
+  // find first sequence of 6+ digits
+  const match = text.match(/(\d{6,})/);
+  return match ? match[1] : null;
+}
+
+async function downloadRobloxAsset(assetId) {
+  const url = `https://assetdelivery.roblox.com/v1/asset?id=${assetId}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to download asset ${assetId}: ${res.status}`);
+  const contentLength = res.headers.get('content-length');
+  if (contentLength && Number(contentLength) > MAX_FILE_SIZE) throw new Error('Remote asset exceeds max allowed size');
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length > MAX_FILE_SIZE) throw new Error('Remote asset exceeds max allowed size');
+  const contentType = res.headers.get('content-type') || 'application/octet-stream';
+  // attempt to determine extension
+  let ext = '';
+  if (contentType.startsWith('audio/')) ext = contentType.split('/')[1];
+  else if (contentType.startsWith('image/')) ext = contentType.split('/')[1];
+  else if (contentType.includes('octet') || contentType.includes('model') ) ext = 'bin';
+  const filename = `${assetId}.${ext || 'bin'}`;
+  return { buffer, filename, contentType };
 }
 
 async function uploadToRoblox({ buffer, fileName, contentType, displayName, type }) {
@@ -168,7 +185,6 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // For publish-audio, support optional existing asset id/url and play_speed
     const providedAsset = interaction.options.getString && interaction.options.getString('asset');
     const playSpeed = interaction.options.getNumber && interaction.options.getNumber('play_speed');
 
@@ -185,21 +201,53 @@ client.on('interactionCreate', async (interaction) => {
     let operationId = null;
     let status = 'Unknown';
 
-    // If user provided an existing asset id/url, detect it and skip upload
+    // If user provided an existing asset id/url, detect it and perform direct publish (download + re-upload)
     const detectedId = extractRobloxAssetId(providedAsset || (attachment && attachment.name) || interaction.options.getString && interaction.options.getString('asset'));
     if (detectedId) {
-      finalAssetId = detectedId;
-      status = 'Provided';
-      recordUpload(interaction.user.id, { timestamp: Date.now(), command: cmd, originalName: `asset:${finalAssetId}`, size: 0, contentType: 'n/a', status, assetId: finalAssetId });
-      let reply = `Detected provided Roblox asset ID: ${finalAssetId}.`;
-      if (cmd === 'publish-audio' && playSpeed) {
-        reply += `\nRecommended Roblox usage: set Sound.PlaybackSpeed = ${playSpeed};`;
+      // direct publish requested
+      await interaction.deferReply({ ephemeral: true });
+      try {
+        const downloaded = await downloadRobloxAsset(detectedId);
+        // determine expected roblox type based on command
+        let robloxType = null;
+        if (cmd === 'publish-audio') robloxType = 'Audio';
+        else if (cmd === 'publish-image') robloxType = 'Image';
+        else if (cmd === 'publish-model') robloxType = 'Model';
+        // upload to Open Cloud Assets
+        const robloxResp = await uploadToRoblox({ buffer: downloaded.buffer, fileName: downloaded.filename, contentType: downloaded.contentType, displayName: `Imported from ${detectedId}`, type: robloxType });
+        operationId = robloxResp.operationId || robloxResp.operation_id || robloxResp.operation || null;
+        finalAssetId = robloxResp.id || robloxResp.assetId || null;
+        status = 'Uploaded';
+        if (operationId) {
+          try {
+            const op = await pollOperation(operationId, 30000, 2500);
+            if (op.status === 'Succeeded') {
+              status = 'Succeeded';
+              finalAssetId = finalAssetId || op.assetId || op.result?.assetId || op.result?.id || null;
+            } else {
+              status = op.status || 'Failed';
+            }
+          } catch (err) {
+            console.warn('Polling error (non fatal):', err.message);
+            status = 'Pending';
+          }
+        }
+        recordUpload(interaction.user.id, { timestamp: Date.now(), command: cmd, originalName: `imported:${detectedId}`, size: downloaded.buffer.length, contentType: downloaded.contentType, status, assetId: finalAssetId, operationId });
+
+        let reply = `Imported and published asset. Status: ${status}.`;
+        if (finalAssetId) reply += ` Asset ID: ${finalAssetId}`;
+        if (cmd === 'publish-audio' && playSpeed) reply += `\nRecommended Roblox usage: set Sound.PlaybackSpeed = ${playSpeed};`;
+        reply += '\nNote: the bot uploaded this asset under the configured ROBLOX_CREATOR_ID. Ensure you have rights to republish the original asset.';
+        await interaction.editReply({ content: reply });
+      } catch (err) {
+        console.error('Direct publish error:', err);
+        await interaction.editReply({ content: `Failed to import and publish asset ${detectedId}: ${err.message}` });
+        recordUpload(interaction.user.id, { timestamp: Date.now(), command: cmd, originalName: `import_failed:${detectedId}`, size: 0, contentType: 'n/a', status: 'Failed', robloxResponse: err.message });
       }
-      reply += '\nNote: this bot did not upload the file. Availability and moderation are determined by Roblox.';
-      await interaction.reply({ content: reply, ephemeral: true });
       return;
     }
 
+    // No detected id -> proceed with normal upload from attachment
     if (!attachment) {
       await interaction.reply({ content: 'No file provided and no recognizable asset id/url. Please attach a file or provide an existing Roblox asset id/url via the asset option.', ephemeral: true });
       return;
